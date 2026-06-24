@@ -91,7 +91,7 @@ void RegisterBrowserStatePrefs(user_prefs::PrefRegistrySyncable* registry) {
 
   registry->RegisterBooleanPref(
       global_privacy_control::kGlobalPrivacyControlEnabled, true);
-  registry->RegisterBooleanPref(prefs::kMediaBackgroundingEnabled, false);
+  registry->RegisterBooleanPref(prefs::kMediaBackgroundingEnabled, true);
   registry->RegisterBooleanPref(prefs::kBlockAllCookiesEnabled, false);
 }
 

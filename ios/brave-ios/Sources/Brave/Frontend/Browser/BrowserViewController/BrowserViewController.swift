@@ -3,6 +3,7 @@
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 import AIChat
+import AVFoundation
 import BraveCore
 import BraveNews
 import BraveShared
@@ -485,6 +486,7 @@ public class BrowserViewController: UIViewController {
           forPath: kMediaBackgroundingEnabled
         )
       ])
+      configureBackgroundAudioSessionCategoryIfNeeded()
       tabManager.reloadSelectedTab()
     }
     prefsChangeRegistrar.addObserver(forPath: kBlockAllCookiesEnabled) { [weak self] _ in
@@ -848,9 +850,28 @@ public class BrowserViewController: UIViewController {
     }
   }
 
+  private func configureBackgroundAudioSessionCategoryIfNeeded() {
+    guard profileController.profile.prefs.boolean(forPath: kMediaBackgroundingEnabled) else {
+      return
+    }
+
+    do {
+      try AVAudioSession.sharedInstance().setCategory(
+        .playback,
+        mode: .default,
+        options: [.mixWithOthers]
+      )
+    } catch {
+      Logger.module.error(
+        "Failed to configure background media audio session: \(error.localizedDescription)"
+      )
+    }
+  }
+
   override public func viewDidLoad() {
     super.viewDidLoad()
     view.backgroundColor = UIColor(braveSystemName: .containerBackground)
+    configureBackgroundAudioSessionCategoryIfNeeded()
 
     // Add layout guides
     view.addLayoutGuide(pageOverlayLayoutGuide)
