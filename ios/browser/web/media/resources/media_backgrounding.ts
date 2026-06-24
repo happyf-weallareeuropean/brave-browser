@@ -4,91 +4,127 @@
 // You can obtain one at https://mozilla.org/MPL/2.0/.
 
 function enable(): void {
+  const windowWithState = window as any
+  if (windowWithState.braveMediaBackgroundingEnabled) {
+    return
+  }
+  windowWithState.braveMediaBackgroundingEnabled = true
+
   const descriptor = Object.getOwnPropertyDescriptor(
     Document.prototype,
     'visibilityState',
-  )!
-  const visibilityStateGet = descriptor.get!
+  )
+  const visibilityStateGet = descriptor?.get
 
-  Object.defineProperty(Document.prototype, 'visibilityState', {
-    enumerable: descriptor.enumerable,
-    configurable: descriptor.configurable,
-    get() {
-      const result = visibilityStateGet.call(this)
-      if (result !== 'visible') {
-        return 'visible'
+  if (descriptor && visibilityStateGet) {
+    Object.defineProperty(Document.prototype, 'visibilityState', {
+      enumerable: descriptor.enumerable,
+      configurable: descriptor.configurable,
+      get() {
+        const result = visibilityStateGet.call(this)
+        if (result !== 'visible') {
+          return 'visible'
+        }
+        return result
+      },
+    })
+  }
+
+  type MediaState = {
+    lastUserInteractionTime: number
+    presentationModeListener: boolean
+    userHitPause: boolean
+  }
+
+  const mediaStates = new WeakMap<HTMLMediaElement, MediaState>()
+  const listeningMediaElements = new WeakSet<HTMLMediaElement>()
+  const observedRoots = new WeakSet<Document | ShadowRoot>()
+  const backgroundTransitionWindowMs = 2000
+  const userInteractionWindowMs = 1000
+  let lastHiddenTransitionTime = 0
+
+  function realVisibilityState(): DocumentVisibilityState {
+    return visibilityStateGet?.call(document) ?? document.visibilityState
+  }
+
+  function stateFor(element: HTMLMediaElement): MediaState {
+    let state = mediaStates.get(element)
+    if (!state) {
+      state = {
+        lastUserInteractionTime: 0,
+        presentationModeListener: false,
+        userHitPause: false,
       }
-      return result
-    },
-  })
+      mediaStates.set(element, state)
+    }
+    return state
+  }
 
-  const pauseControl = HTMLVideoElement.prototype.pause
-  HTMLVideoElement.prototype.pause = function (): void {
-    ;(this as any).userHitPause = true
+  function isInBackgroundTransition(): boolean {
+    return Date.now() - lastHiddenTransitionTime <= backgroundTransitionWindowMs
+  }
+
+  function maybePlay(element: HTMLMediaElement): void {
+    if (element.ended || !element.paused) {
+      return
+    }
+
+    void playControl.call(element).catch(() => {})
+  }
+
+  document.addEventListener(
+    'visibilitychange',
+    function () {
+      if (realVisibilityState() !== 'visible') {
+        lastHiddenTransitionTime = Date.now()
+      }
+    },
+    false,
+  )
+
+  const pauseControl = HTMLMediaElement.prototype.pause
+  HTMLMediaElement.prototype.pause = function (): void {
+    const state = stateFor(this)
+    state.userHitPause =
+      realVisibilityState() === 'visible' &&
+      Date.now() - state.lastUserInteractionTime <= userInteractionWindowMs
     pauseControl.call(this)
   }
 
-  const playControl = HTMLVideoElement.prototype.play
-  HTMLVideoElement.prototype.play = function (): Promise<void> {
-    ;(this as any).userHitPause = false
+  const playControl = HTMLMediaElement.prototype.play
+  HTMLMediaElement.prototype.play = function (): Promise<void> {
+    stateFor(this).userHitPause = false
     return playControl.call(this)
   }
 
-  function addListeners(element: HTMLVideoElement): void {
-    if (!(element as any).pauseListener) {
-      ;(element as any).pauseListener = true
-      ;(element as any).visibilityState = visibilityStateGet.call(document)
+  function addListeners(element: HTMLMediaElement): void {
+    if (!listeningMediaElements.has(element)) {
+      listeningMediaElements.add(element)
+      const state = stateFor(element)
+      const recordUserInteraction = () => {
+        state.lastUserInteractionTime = Date.now()
+      }
 
-      document.addEventListener(
-        'visibilitychange',
-        function () {
-          ;(element as any).visibilityState = visibilityStateGet.call(document)
-        },
-        false,
-      )
+      element.addEventListener('pointerdown', recordUserInteraction, true)
+      element.addEventListener('touchstart', recordUserInteraction, true)
+      element.addEventListener('keydown', recordUserInteraction, true)
 
       element.addEventListener(
         'pause',
         function () {
-          if (
-            !(element as any).userHitPause
-            && visibilityStateGet.call(document) === 'visible'
-          ) {
-            const onVisibilityChanged = () => {
-              document.removeEventListener(
-                'visibilitychange',
-                onVisibilityChanged,
-              )
-              if (
-                visibilityStateGet.call(document) !== 'visible'
-                && !element.ended
-              ) {
-                playControl.call(element)
-              }
-            }
-            document.addEventListener('visibilitychange', onVisibilityChanged)
-            setTimeout(function () {
-              document.removeEventListener(
-                'visibilitychange',
-                onVisibilityChanged,
-              )
-            }, 2000)
-          } else {
-            if (
-              !(element as any).userHitPause
-              && (element as any).visibilityState === 'visible'
-              && !element.ended
-            ) {
-              playControl.call(element)
-            }
+          const isBackgroundPause =
+            realVisibilityState() !== 'visible' || isInBackgroundTransition()
+          if (!state.userHitPause && isBackgroundPause) {
+            maybePlay(element)
           }
         },
         false,
       )
     }
 
-    if (!(element as any).presentationModeListener) {
-      ;(element as any).presentationModeListener = true
+    const state = stateFor(element)
+    if (element instanceof HTMLVideoElement && !state.presentationModeListener) {
+      state.presentationModeListener = true
       element.addEventListener(
         'webkitpresentationmodechanged',
         function (e) {
@@ -100,13 +136,43 @@ function enable(): void {
   }
 
   const queue: MutationRecord[] = []
+  function addMediaElements(root: ParentNode): void {
+    root
+      .querySelectorAll('audio, video')
+      .forEach((element) => addListeners(element as HTMLMediaElement))
+  }
+
+  function observeRoot(root: Document | ShadowRoot): void {
+    if (observedRoots.has(root)) {
+      return
+    }
+    observedRoots.add(root)
+    addMediaElements(root)
+    observer.observe(root, {
+      childList: true,
+      attributes: false,
+      characterData: false,
+      subtree: true,
+      attributeOldValue: false,
+      characterDataOldValue: false,
+    })
+  }
+
+  function scanNode(node: Node): void {
+    if (node instanceof HTMLMediaElement) {
+      addListeners(node)
+    }
+    if (node instanceof Element) {
+      addMediaElements(node)
+      if (node.shadowRoot) {
+        observeRoot(node.shadowRoot)
+      }
+    }
+  }
+
   function onMutation(): void {
     for (const mutation of queue) {
-      mutation.addedNodes.forEach(function (node: Node) {
-        if (node instanceof HTMLVideoElement) {
-          addListeners(node)
-        }
-      })
+      mutation.addedNodes.forEach(scanNode)
     }
     queue.length = 0
   }
@@ -118,18 +184,16 @@ function enable(): void {
     queue.push(...mutations)
   })
 
-  document
-    .querySelectorAll('video')
-    .forEach((v) => addListeners(v as HTMLVideoElement))
+  const attachShadow = Element.prototype.attachShadow
+  Element.prototype.attachShadow = function (
+    init: ShadowRootInit,
+  ): ShadowRoot {
+    const shadowRoot = attachShadow.call(this, init)
+    observeRoot(shadowRoot)
+    return shadowRoot
+  }
 
-  observer.observe(document, {
-    childList: true,
-    attributes: false,
-    characterData: false,
-    subtree: true,
-    attributeOldValue: false,
-    characterDataOldValue: false,
-  })
+  observeRoot(document)
 }
 
 if ((window as any).gCrWebPlaceholderMediaBackgroundingEnabled) {
